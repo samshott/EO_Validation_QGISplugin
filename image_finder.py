@@ -1,219 +1,236 @@
 from pathlib import Path
 from PIL import Image
 import os
-from typing import List, Callable, Optional, Dict, Any, Tuple
-from fractions import Fraction
+from typing import List, Callable, Optional, Dict, Any
+import json
+from dataclasses import dataclass, asdict
+from datetime import datetime
+
+@dataclass
+class ImageData:
+    """Structure for storing image location data."""
+    file_path: str
+    filename: str
+    latitude: float
+    longitude: float
+    altitude: float
+    timestamp: str
+    capture_id: str
 
 class ImageFinder:
-    """A class to find and extract GPS coordinates from MicaSense Altum images.
+    """A class to find MicaSense images and extract their location data."""
     
-    This class handles the complexities of GPS data storage in TIFF files, including:
-    - Finding the GPS IFD (Image File Directory) within the TIFF structure
-    - Converting GPS coordinates from their raw rational number format
-    - Handling the various coordinate reference indicators (N/S, E/W)
-    """
-    
-    # Define GPS tag IDs according to the EXIF specification
     GPS_TAG_MAP = {
-        'GPSLatitudeRef': 1,    # N or S
-        'GPSLatitude': 2,       # Latitude degrees, minutes, seconds
-        'GPSLongitudeRef': 3,   # E or W
-        'GPSLongitude': 4,      # Longitude degrees, minutes, seconds
-        'GPSAltitudeRef': 5,    # Above/below sea level
-        'GPSAltitude': 6,       # Altitude in meters
-        'GPSTimeStamp': 7,      # UTC timestamp
+        'GPSLatitudeRef': 1,
+        'GPSLatitude': 2,
+        'GPSLongitudeRef': 3,
+        'GPSLongitude': 4,
+        'GPSAltitudeRef': 5,
+        'GPSAltitude': 6,
+        'GPSTimeStamp': 7,
     }
     
     def __init__(self):
         self._files_processed = 0
         self._total_files = 0
     
-    def _convert_gps_coords(self, coords: Tuple, ref: str) -> float:
-        """Convert GPS coordinates from degrees/minutes/seconds to decimal degrees.
+    def _find_set_folders(self, root_path: Path) -> List[Path]:
+        """Find all folders ending in 'SET' and their subfolders.
+        
+        This method searches the directory tree and identifies:
+        1. Folders that end with 'SET'
+        2. Any subfolders within those SET folders
         
         Args:
-            coords: Tuple of three rational numbers (degrees, minutes, seconds)
-            ref: Direction reference ('N', 'S', 'E', or 'W')
+            root_path: The starting directory for the search
             
         Returns:
-            Float representing the decimal degrees, negative for S or W
+            List of Path objects for all relevant folders to search
         """
-        # Convert each component from rational numbers to float
+        set_folders = []
+        
+        # Walk through all directories
+        for dir_path in root_path.rglob('*'):
+            if dir_path.is_dir():
+                # Check if this directory ends with 'SET'
+                if dir_path.name.endswith('SET'):
+                    set_folders.append(dir_path)
+                    # Also add all its subdirectories
+                    set_folders.extend([p for p in dir_path.rglob('*') if p.is_dir()])
+                # If this directory is under a 'SET' folder, it's already included
+                elif any(str(dir_path).startswith(str(set_folder)) 
+                        for set_folder in set_folders):
+                    continue
+        
+        print(f"\nFound {len(set_folders)} SET folders and their subdirectories:")
+        for folder in set_folders:
+            print(f"  {folder}")
+            
+        return set_folders
+
+    def _convert_gps_coords(self, coords: tuple, ref: str) -> float:
+        """Convert GPS coordinates from degrees/minutes/seconds to decimal degrees."""
         degrees = float(coords[0])
         minutes = float(coords[1])
         seconds = float(coords[2])
         
-        # Calculate decimal degrees
         decimal = degrees + (minutes / 60.0) + (seconds / 3600.0)
         
-        # Make negative if South or West
         if ref in ['S', 'W']:
             decimal = -decimal
             
         return decimal
     
-    def _extract_gps_info(self, img: Image.Image) -> Dict[str, Any]:
-        """Extract GPS information from a TIFF image.
-        
-        This method handles the complex structure of GPS data in TIFF files by:
-        1. Finding the GPS IFD offset
-        2. Reading the raw GPS values
-        3. Converting coordinates to decimal degrees
-        
-        Args:
-            img: PIL Image object of the TIFF file
-            
-        Returns:
-            Dictionary containing extracted GPS information
-        """
+    def _extract_capture_id(self, xmp_data: bytes) -> str:
+        """Extract the MicaSense capture ID from XMP metadata."""
         try:
-            if not hasattr(img, 'tag'):
-                return {}
-                
-            # The GPS IFD is stored in tag 34853
-            gps_ifd_offset = img.tag.get(34853)
-            if not gps_ifd_offset:
-                return {}
-                
-            # The GPS data is stored in a separate IFD
-            gps_tags = img.tag.get(34853)
-            if not gps_tags:
-                return {}
-                
-            gps_info = {}
-            
-            # Extract GPS data if available
-            # Note: We're using img.getexif().get_ifd(34853) as a more reliable
-            # way to access the GPS IFD
+            xmp_str = xmp_data.decode('utf-8')
+            if 'MicaSense:CaptureId' in xmp_str:
+                start = xmp_str.find('MicaSense:CaptureId') + len('MicaSense:CaptureId') + 1
+                end = xmp_str.find('</MicaSense:CaptureId>')
+                return xmp_str[start:end].strip()
+        except:
+            pass
+        return ""
+    
+    def _extract_image_data(self, img: Image.Image, file_path: Path) -> Optional[ImageData]:
+        """Extract all relevant data from an image into our structured format."""
+        try:
             gps_data = img.getexif().get_ifd(34853)
             if not gps_data:
-                return {}
+                return None
                 
-            # Debug: Print out the GPS data we found
-            print("\nGPS Data found:")
-            for tag_id, value in gps_data.items():
-                tag_name = next((name for name, id in self.GPS_TAG_MAP.items() if id == tag_id), str(tag_id))
-                print(f"{tag_name}: {value} (type: {type(value)})")
+            # Extract GPS coordinates
+            if not all(tag in gps_data for tag in [
+                self.GPS_TAG_MAP['GPSLatitude'],
+                self.GPS_TAG_MAP['GPSLatitudeRef'],
+                self.GPS_TAG_MAP['GPSLongitude'],
+                self.GPS_TAG_MAP['GPSLongitudeRef'],
+                self.GPS_TAG_MAP['GPSAltitude']
+            ]):
+                return None
             
-            # Get latitude
-            if (self.GPS_TAG_MAP['GPSLatitude'] in gps_data and 
-                self.GPS_TAG_MAP['GPSLatitudeRef'] in gps_data):
-                lat = gps_data[self.GPS_TAG_MAP['GPSLatitude']]
-                lat_ref = gps_data[self.GPS_TAG_MAP['GPSLatitudeRef']]
-                # Handle reference value whether it's bytes or string
-                if isinstance(lat_ref, bytes):
-                    lat_ref = lat_ref.decode()
-                gps_info['latitude'] = self._convert_gps_coords(lat, lat_ref)
+            lat = gps_data[self.GPS_TAG_MAP['GPSLatitude']]
+            lat_ref = gps_data[self.GPS_TAG_MAP['GPSLatitudeRef']]
+            if isinstance(lat_ref, bytes):
+                lat_ref = lat_ref.decode()
+            latitude = self._convert_gps_coords(lat, lat_ref)
             
-            # Get longitude
-            if (self.GPS_TAG_MAP['GPSLongitude'] in gps_data and 
-                self.GPS_TAG_MAP['GPSLongitudeRef'] in gps_data):
-                lon = gps_data[self.GPS_TAG_MAP['GPSLongitude']]
-                lon_ref = gps_data[self.GPS_TAG_MAP['GPSLongitudeRef']]
-                # Handle reference value whether it's bytes or string
-                if isinstance(lon_ref, bytes):
-                    lon_ref = lon_ref.decode()
-                gps_info['longitude'] = self._convert_gps_coords(lon, lon_ref)
+            lon = gps_data[self.GPS_TAG_MAP['GPSLongitude']]
+            lon_ref = gps_data[self.GPS_TAG_MAP['GPSLongitudeRef']]
+            if isinstance(lon_ref, bytes):
+                lon_ref = lon_ref.decode()
+            longitude = self._convert_gps_coords(lon, lon_ref)
             
-            # Get altitude
-            if self.GPS_TAG_MAP['GPSAltitude'] in gps_data:
-                alt = gps_data[self.GPS_TAG_MAP['GPSAltitude']]
-                # Altitude is stored as a single rational number
-                gps_info['altitude'] = float(alt)
+            altitude = float(gps_data[self.GPS_TAG_MAP['GPSAltitude']])
+            timestamp = img.tag.get(306, ('',))[0]  # DateTime tag
             
-            return gps_info
+            capture_id = ""
+            if 700 in img.tag:  # XMP tag
+                capture_id = self._extract_capture_id(img.tag[700][0])
+            
+            return ImageData(
+                file_path=str(file_path),
+                filename=file_path.name,
+                latitude=latitude,
+                longitude=longitude,
+                altitude=altitude,
+                timestamp=timestamp,
+                capture_id=capture_id
+            )
             
         except Exception as e:
-            print(f"Error extracting GPS info: {str(e)}")
-            return {}
+            print(f"Error extracting image data: {str(e)}")
+            return None
     
-    def _is_valid_image(self, file_path: Path) -> bool:
-        """Validate if an image has the required GPS metadata.
+    def process_images(self, 
+                      root_dir: str, 
+                      progress_callback: Optional[Callable[[float], None]] = None
+                      ) -> List[ImageData]:
+        """Find all band 1 images in SET folders and extract their data.
         
-        Args:
-            file_path: Path to the image file
-            
-        Returns:
-            Boolean indicating if the image has valid GPS data
-        """
-        try:
-            with Image.open(file_path) as img:
-                # First check if it's a MicaSense Altum image
-                make = img.tag.get(271)
-                model = img.tag.get(272)
-                if not (make and model and 
-                       make[0] == 'MicaSense' and 
-                       model[0] == 'Altum'):
-                    return False
-                
-                # Extract GPS information
-                gps_info = self._extract_gps_info(img)
-                
-                # Check if we got the minimum required GPS data
-                has_coords = all(key in gps_info for key in ['latitude', 'longitude'])
-                
-                if has_coords:
-                    print(f"\nFound valid image: {file_path}")
-                    print(f"Latitude: {gps_info['latitude']:.6f}")
-                    print(f"Longitude: {gps_info['longitude']:.6f}")
-                    if 'altitude' in gps_info:
-                        print(f"Altitude: {gps_info['altitude']:.2f} meters")
-                
-                return has_coords
-                
-        except Exception as e:
-            print(f"Error validating image {file_path}: {str(e)}")
-            return False
-    
-    def find_band_one_images(self, 
-                            root_dir: str, 
-                            progress_callback: Optional[Callable[[float], None]] = None
-                            ) -> List[Path]:
-        """Find all valid band 1 images with GPS data in the given directory.
+        This method:
+        1. Identifies all relevant SET folders to search
+        2. Finds band 1 images within those folders
+        3. Extracts location data from valid images
+        4. Saves the results to a JSON file in the root directory
         
         Args:
             root_dir: String path to the root directory to search
             progress_callback: Optional function for progress updates
             
         Returns:
-            List of Path objects pointing to valid band 1 images
+            List of ImageData objects containing image information
         """
         root_path = Path(root_dir)
         if not root_path.exists() or not root_path.is_dir():
             raise ValueError(f"Invalid directory path: {root_dir}")
-            
-        self._files_processed = 0
-        self._total_files = sum(1 for _ in root_path.rglob('*'))
         
+        # Find all SET folders and their subfolders
+        set_folders = self._find_set_folders(root_path)
+        if not set_folders:
+            print("No SET folders found!")
+            return []
+            
         valid_images = []
+        total_files = sum(1 for folder in set_folders 
+                         for _ in folder.rglob('*_1.tif'))
+        processed_files = 0
         
-        for file_path in root_path.rglob('*'):
-            self._files_processed += 1
-            
-            if progress_callback and self._total_files > 0:
-                progress = self._files_processed / self._total_files
-                progress_callback(progress)
-            
-            if file_path.name.endswith('_1.tif'):
-                if self._is_valid_image(file_path):
-                    valid_images.append(file_path)
+        # Process each SET folder
+        for folder in set_folders:
+            for file_path in folder.rglob('*_1.tif'):
+                processed_files += 1
+                
+                if progress_callback:
+                    progress = processed_files / total_files
+                    progress_callback(progress)
+                
+                try:
+                    with Image.open(file_path) as img:
+                        # Verify it's a MicaSense image
+                        make = img.tag.get(271)
+                        model = img.tag.get(272)
+                        if make and model and make[0] == 'MicaSense' and model[0] == 'Altum':
+                            image_data = self._extract_image_data(img, file_path)
+                            if image_data:
+                                valid_images.append(image_data)
+                                print(f"\nFound valid image: {file_path}")
+                                print(f"Latitude: {image_data.latitude:.6f}")
+                                print(f"Longitude: {image_data.longitude:.6f}")
+                                print(f"Altitude: {image_data.altitude:.2f} meters")
+                                print(f"Timestamp: {image_data.timestamp}")
+                except Exception as e:
+                    print(f"Error processing {file_path}: {str(e)}")
         
         if progress_callback:
             progress_callback(1.0)
+        
+        # Save results to JSON in root directory
+        output_file = root_path / 'Altum_image_locations.json'
+        self.save_to_json(valid_images, output_file)
             
         return valid_images
-def print_progress(progress: float):
-    """Example progress callback that prints percentage."""
-    print(f"Progress: {progress * 100:.0f}%")
     
+    def save_to_json(self, image_data: List[ImageData], output_file: Path):
+        """Save the image data to a JSON file."""
+        data_dicts = [asdict(data) for data in image_data]
+        
+        with open(output_file, 'w') as f:
+            json.dump(data_dicts, f, indent=2)
+            
+        print(f"\nSaved {len(data_dicts)} image records to {output_file}")
+
+def print_progress(progress: float):
+    print(f"Progress: {progress * 100:.1f}%")
+
 finder = ImageFinder()
 try:
-    images = finder.find_band_one_images(
-        r"C:\0DATA\240920_Arc_graveyard\Combined\Flight2\Altum\0000SET\004", 
+    # Process images and save results
+    images = finder.process_images(
+        r"C:\0DATA\240920_Arc_graveyard\Combined", 
         progress_callback=print_progress
     )
-    print(f"\nFound {len(images)} valid band 1 images:")
-    for image in images:
-        print(f"  {image}")
+    
 except ValueError as e:
     print(f"Error: {e}")
