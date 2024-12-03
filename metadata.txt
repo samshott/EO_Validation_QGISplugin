@@ -1,0 +1,7 @@
+[general]
+name=PPK Image Validator
+description=Validate and adjust PPK/EO reference data against image geotags
+version=0.1
+qgisMinimumVersion=3.0
+author=Sam Ericksen
+email=Serick03@CalPoly.edu
