@@ -221,16 +221,16 @@ class ImageFinder:
             
         print(f"\nSaved {len(data_dicts)} image records to {output_file}")
 
-# def print_progress(progress: float):
-#     print(f"Progress: {progress * 100:.1f}%")
+def print_progress(progress: float):
+    print(f"Progress: {progress * 100:.1f}%")
 
-# finder = ImageFinder()
-# try:
-#     # Process images and save results
-#     images = finder.process_images(
-#         r"C:\0DATA\240920_Arc_graveyard\Combined", 
-#         progress_callback=print_progress
-#     )
+finder = ImageFinder()
+try:
+    # Process images and save results
+    images = finder.process_images(
+        r"D:\241107_PetersonP6", 
+        progress_callback=print_progress
+    )
     
-# except ValueError as e:
-#     print(f"Error: {e}")
+except ValueError as e:
+    print(f"Error: {e}")

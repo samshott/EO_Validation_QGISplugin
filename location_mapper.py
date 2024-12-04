@@ -219,7 +219,7 @@ mapper = LocationMapper()
 
 # Map the image locations
 layer = mapper.map_locations(
-    r"C:\0DATA\240920_Arc_graveyard\Combined\Altum_image_locations.json",
+    r"D:\241107_PetersonP6\Altum_image_locations.json",
     transform_to_utm=True
 )
 
